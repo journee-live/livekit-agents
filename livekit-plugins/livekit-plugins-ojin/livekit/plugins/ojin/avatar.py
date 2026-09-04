@@ -43,7 +43,10 @@ _DEFAULT_TURN_RENDER_TIMEOUT = 10.0
 _DEFAULT_SESSION_READY_TIMEOUT = 30.0
 # Covers server render plus the SDK's warm-up hold once video starts arriving.
 _DEFAULT_FIRST_FRAME_TIMEOUT = 15.0
-_DEFAULT_WATCHDOG_TIMEOUT = 10.0
+# Production has been seen pausing frames for ~11s on an otherwise healthy
+# socket. The watchdog is terminal - there is no reconnect - so it has to sit
+# above a plausible hiccup rather than at it.
+_DEFAULT_WATCHDOG_TIMEOUT = 15.0
 
 _FrameOrEnd = rtc.VideoFrame | rtc.AudioFrame | AudioSegmentEnd
 

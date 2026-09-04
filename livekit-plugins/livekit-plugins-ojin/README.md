@@ -71,7 +71,7 @@ AVF... is implemented in both ...` warnings at startup are harmless.
 | `audio_sample_rate` | `24000` | rate the agent's TTS is resampled to |
 | `session_ready_timeout` | `30.0` | seconds to wait for the session |
 | `first_frame_timeout` | `15.0` | seconds to wait for the first video frame (waited *after* the one above, so an unreachable backend fails `start()` in up to 45 s) |
-| `watchdog_timeout` | `10.0` | seconds without a server frame before failing |
+| `watchdog_timeout` | `15.0` | seconds without a server frame before failing (terminal — the avatar does not reconnect) |
 | `turn_render_timeout` | `10.0` | seconds a fed turn may go unrendered |
 
 If the session fails mid-conversation the avatar is torn down and the agent keeps
