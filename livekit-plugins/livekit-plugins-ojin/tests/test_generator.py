@@ -256,3 +256,43 @@ async def test_aiter_yields_sink_frames_in_order() -> None:
 
     assert isinstance(first, rtc.VideoFrame)
     assert isinstance(second, rtc.AudioFrame)
+
+
+# --- output format safety ---------------------------------------------------
+
+
+async def test_input_resampled_to_the_configured_rate() -> None:
+    """Ojin echoes back whatever rate we send, and the track's rate is fixed.
+
+    The framework only installs its own resampler on a segment's first frame, so
+    after a barge-in a native-rate frame can reach us unresampled.
+    """
+    client, _, gen = build()
+    off_rate = rtc.AudioFrame(
+        data=b"\x11\x22" * 640, sample_rate=16000, num_channels=1, samples_per_channel=640
+    )
+
+    await gen.push_audio(off_rate)
+
+    assert client.sent, "nothing was sent"
+    _, rate, channels = client.sent[0]
+    assert (rate, channels) == (24000, 1), "sent at a rate the output track cannot play"
+
+
+async def test_mismatched_echo_is_dropped_not_forwarded() -> None:
+    """A single frame the audio source rejects kills the runner's loop forever."""
+    sink = _FrameSink()
+
+    await sink.write_audio(make_audio_frame(sample_rate=16000))
+
+    assert sink.pending == (), "a frame in the wrong format reached the room"
+    assert sink.format_mismatches == 1
+
+
+async def test_stream_survives_a_mismatched_echo() -> None:
+    sink = _FrameSink()
+
+    await sink.write_audio(make_audio_frame(sample_rate=16000))
+    await sink.write_audio(make_audio_frame())
+
+    assert len(sink.pending) == 1, "the stream did not recover after a bad frame"

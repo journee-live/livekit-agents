@@ -74,6 +74,7 @@ class _FrameSink:
         video_queue_size: int = _VIDEO_QUEUE_SIZE,
         fade_s: float = _DEFAULT_FADE_S,
         turn_render_timeout: float = _DEFAULT_TURN_RENDER_TIMEOUT,
+        audio_sample_rate: int = SAMPLE_RATE,
     ) -> None:
         self._deque: deque[_FrameOrEnd] = deque()
         self._new_item = asyncio.Event()
@@ -82,6 +83,8 @@ class _FrameSink:
         self._dropped_video = 0
         self._fade_s = fade_s
         self._turn_render_timeout = turn_render_timeout
+        self._audio_sample_rate = audio_sample_rate
+        self._format_mismatches = 0
 
         self._first_video_frame: asyncio.Future[STVVideoFrame] | None = None
         self._geometry: tuple[int, int] | None = None
@@ -111,6 +114,28 @@ class _FrameSink:
     # --- STVOutput (called from the SDK's playback loop; must not block) ---
 
     async def write_audio(self, frame: STVAudioFrame) -> None:
+        if is_silence(frame):
+            # Checked first: the fill emitted before the first turn is 16 kHz
+            # shaped, so it would otherwise look like a format fault every session.
+            return
+
+        if frame.sample_rate != self._audio_sample_rate or frame.num_channels != NUM_CHANNELS:
+            # The room's audio track is fixed at the format chosen when the runner
+            # was built, and the source rejects anything else - which would kill
+            # the runner's forwarding loop for the rest of the session. Ojin echoes
+            # back whatever format it was fed, so this should not happen; drop the
+            # frame rather than take the session down with it.
+            self._format_mismatches += 1
+            if self._format_mismatches == 1:
+                logger.error(
+                    "ojin returned audio in an unexpected format; dropping it",
+                    extra={
+                        "expected": (self._audio_sample_rate, NUM_CHANNELS),
+                        "got": (frame.sample_rate, frame.num_channels),
+                    },
+                )
+            return
+
         if is_silence(frame):
             return
         if self._muting:
@@ -293,6 +318,10 @@ class _FrameSink:
         return self._geometry_mismatches
 
     @property
+    def format_mismatches(self) -> int:
+        return self._format_mismatches
+
+    @property
     def rendered_turns(self) -> int:
         return self._rendered_turns
 
@@ -363,6 +392,9 @@ class OjinVideoGenerator(VideoGenerator):
         self._gap_interrupt_logged = False
         self._last_interrupt_true = 0.0
         self._fade_s = sink._fade_s
+        self._sample_rate = sink._audio_sample_rate
+        self._resampler: rtc.AudioResampler | None = None
+        self._resampler_input_rate = 0
 
     async def push_audio(self, frame: rtc.AudioFrame | AudioSegmentEnd) -> None:
         if isinstance(frame, AudioSegmentEnd):
@@ -392,8 +424,17 @@ class OjinVideoGenerator(VideoGenerator):
 
         try:
             pcm = downmix_to_mono(bytes(frame.data), frame.num_channels)
+            if frame.sample_rate != self._sample_rate:
+                # Ojin plays back whatever we feed it, and the room's track runs at
+                # a fixed rate, so anything else has to be converted here. The
+                # framework installs its own resampler only on a segment's first
+                # frame, so an off-rate frame can still reach us mid-stream.
+                pcm = self._resample(pcm, frame.sample_rate)
         except Exception:
-            logger.exception("ojin audio downmix failed; dropping this chunk")
+            logger.exception("ojin audio conversion failed; dropping this chunk")
+            return
+
+        if not pcm:
             return
 
         if pcm.strip(b"\x00"):
@@ -405,9 +446,28 @@ class OjinVideoGenerator(VideoGenerator):
             self._sink.note_input_audio()
 
         try:
-            await self._client.send_tts_audio(pcm, frame.sample_rate, NUM_CHANNELS)
+            await self._client.send_tts_audio(pcm, self._sample_rate, NUM_CHANNELS)
         except Exception:
             logger.exception("ojin send_tts_audio failed; dropping this chunk")
+
+    def _resample(self, pcm: bytes, input_rate: int) -> bytes:
+        if self._resampler is None or self._resampler_input_rate != input_rate:
+            logger.debug(
+                "resampling avatar input audio",
+                extra={"from": input_rate, "to": self._sample_rate},
+            )
+            self._resampler = rtc.AudioResampler(
+                input_rate=input_rate, output_rate=self._sample_rate, num_channels=NUM_CHANNELS
+            )
+            self._resampler_input_rate = input_rate
+
+        frame = rtc.AudioFrame(
+            data=pcm,
+            sample_rate=input_rate,
+            num_channels=NUM_CHANNELS,
+            samples_per_channel=len(pcm) // 2,
+        )
+        return b"".join(bytes(out.data) for out in self._resampler.push(frame))
 
     async def clear_buffer(self) -> None:
         """Barge-in. Never raises.
@@ -559,6 +619,7 @@ class AvatarSession(BaseAvatarSession):
         return _FrameSink(
             fade_s=self._effective_fade_s(),
             turn_render_timeout=self._turn_render_timeout,
+            audio_sample_rate=self._audio_sample_rate,
         )
 
     def _wire_listeners(self, client: OjinSTVClient, sink: _FrameSink) -> None:
