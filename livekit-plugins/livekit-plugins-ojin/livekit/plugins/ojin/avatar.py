@@ -597,6 +597,10 @@ class AvatarSession(BaseAvatarSession):
         self._degrade_starts = 0
 
         self._watchdog_task: asyncio.Task[None] | None = None
+        # Set when a second aclose() runs its drain cleanup, so a degrade still
+        # suspended inside the first one does not start a drain afterwards that
+        # nothing is left to stop.
+        self._drain_stopped = False
         # _degrade calls aclose(), so its own handle must never be among the
         # tasks aclose cancels - that would cancel its caller mid-teardown.
         self._degrade_task: asyncio.Task[None] | None = None
@@ -812,6 +816,11 @@ class AvatarSession(BaseAvatarSession):
         self._degrade_starts += 1
         await self.aclose()
 
+        if self._drain_stopped:
+            # A concurrent aclose() already finished its cleanup while this one
+            # was suspended; starting the drain now would leak it.
+            return
+
         if self._audio_output is not None and self._null_drain_task is None:
             self._null_drain_task = asyncio.create_task(self._null_drain(self._audio_output))
 
@@ -842,6 +851,7 @@ class AvatarSession(BaseAvatarSession):
 
     async def aclose(self) -> None:
         if self._closed:
+            self._drain_stopped = True
             # Teardown already ran, but a degraded session starts its null drain
             # *after* that, so the second call (typically the job's shutdown
             # callback) is what stops it. Without this a long-lived worker leaks

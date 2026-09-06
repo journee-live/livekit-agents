@@ -395,3 +395,26 @@ async def test_render_stall_streak_resets_when_a_turn_renders() -> None:
     await stall()
 
     assert s._fatal_error is None, "non-consecutive stalls must not be fatal"
+
+
+async def test_degrade_does_not_leak_a_drain_when_aclose_races() -> None:
+    """A shutdown aclose() during degrade's teardown must not orphan the drain.
+
+    The second call runs its cleanup while the drain is still unstarted; if
+    degrade then starts one, nothing is left to stop it and a long-lived worker
+    leaks a task per degraded job.
+    """
+    s = session()
+    client = FakeSTVClient()
+    client.close_gate = asyncio.Event()
+    s._client = client
+    s._audio_output = QueueAudioOutput(sample_rate=24000, wait_playback_start=True)
+
+    degrading = asyncio.create_task(s._degrade())
+    await asyncio.sleep(0.01)  # let it suspend inside aclose, on the client close
+
+    await s.aclose()  # the job's shutdown callback, racing the teardown
+    client.close_gate.set()
+    await asyncio.wait_for(degrading, 2)
+
+    assert s._null_drain_task is None, "a drain was started that nothing will stop"

@@ -69,6 +69,7 @@ class FakeSTVClient:
         self.interrupt_raises: Exception | None = None
         self.start_turn_raises: Exception | None = None
         self.start_turn_gate: asyncio.Event | None = None
+        self.close_gate: asyncio.Event | None = None
 
         self._listeners: dict[STVEvent, list[Callable[..., Any]]] = {}
         self.handler_errors: list[TypeError] = []
@@ -79,6 +80,8 @@ class FakeSTVClient:
         self.started = True
 
     async def close(self) -> None:
+        if self.close_gate is not None:
+            await self.close_gate.wait()
         self.close_calls += 1
 
     async def start_turn(self) -> None:
