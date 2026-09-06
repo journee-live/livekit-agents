@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-# mypy: disable-error-code=import-untyped
 from livekit import rtc
 from ojin.stv import STVAudioFrame, STVVideoFrame
 
@@ -64,4 +63,7 @@ def downmix_to_mono(data: bytes, num_channels: int) -> bytes:
     import numpy as np  # available via ojin-client[stv]
 
     samples = np.frombuffer(data, dtype=np.int16).reshape(-1, num_channels)
-    return samples.mean(axis=1).astype(np.int16).tobytes()  # type: ignore[no-any-return]
+    # Annotated rather than cast: numpy is typed or not depending on whether the
+    # stub packages are installed, and this stays correct either way.
+    mono: bytes = samples.mean(axis=1).astype(np.int16).tobytes()
+    return mono

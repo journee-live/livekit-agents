@@ -8,7 +8,6 @@ production.
 
 from __future__ import annotations
 
-# mypy: disable-error-code=import-untyped
 import asyncio
 from collections.abc import Callable
 from typing import Any

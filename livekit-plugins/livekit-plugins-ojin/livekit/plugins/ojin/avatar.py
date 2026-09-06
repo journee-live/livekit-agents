@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-# mypy: disable-error-code=import-untyped
 import asyncio
 import os
 import time
