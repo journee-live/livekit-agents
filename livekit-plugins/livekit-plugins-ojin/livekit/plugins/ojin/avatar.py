@@ -414,6 +414,12 @@ class OjinVideoGenerator(VideoGenerator):
             # and anything running in that window must already see the open turn.
             self._turn_started = True
             self._turn_had_real_audio = False
+            # Opened before the await for the same reason the flag is set before
+            # it: anything running during the suspension must see the segment as
+            # already open. Opening it afterwards would reset the sink's
+            # input-side state and discard audio such a caller had reported,
+            # leaving an unrenderable turn with no deadline to close it.
+            self._sink.note_input_segment_open()
             try:
                 await self._client.start_turn()
             except Exception:
@@ -422,7 +428,6 @@ class OjinVideoGenerator(VideoGenerator):
                 # the rest of the session (it is only guarded by log_exceptions).
                 logger.exception("ojin start_turn failed; dropping this chunk")
                 return
-            self._sink.note_input_segment_open()
 
         try:
             pcm = downmix_to_mono(bytes(frame.data), frame.num_channels)

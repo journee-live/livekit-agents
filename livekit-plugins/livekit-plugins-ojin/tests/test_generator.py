@@ -296,3 +296,30 @@ async def test_stream_survives_a_mismatched_echo() -> None:
     await sink.write_audio(make_audio_frame())
 
     assert len(sink.pending) == 1, "the stream did not recover after a bad frame"
+
+
+async def test_audio_pushed_during_start_turn_survives_the_open() -> None:
+    """Opening the input segment must not discard audio reported during the await.
+
+    The opening chunk here is silence, so only the interleaved call reports real
+    audio. If the open runs after the await it resets that away, and
+    `note_input_segment_end` can no longer arm the render deadline - leaving a
+    turn the server never renders with nothing to close it.
+    """
+    client, sink, gen = build()
+    client.start_turn_gate = asyncio.Event()
+    silent = rtc.AudioFrame(
+        data=bytes(1920), sample_rate=24000, num_channels=1, samples_per_channel=960
+    )
+
+    opening = asyncio.create_task(gen.push_audio(silent))
+    await asyncio.sleep(0)
+    interleaved = asyncio.create_task(gen.push_audio(chunk()))
+    await asyncio.sleep(0)
+    client.start_turn_gate.set()
+    await asyncio.gather(opening, interleaved)
+
+    assert sink._input_had_audio is True, "audio reported during the await was lost"
+
+    sink.note_input_segment_end(had_real_audio=True)
+    assert sink._render_deadline is not None, "an unrendered turn has no deadline"
