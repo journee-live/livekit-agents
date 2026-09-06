@@ -35,9 +35,20 @@ await avatar.start(session, room=ctx.room)
 await session.start(agent=..., room=ctx.room)
 ```
 
-See the [example agent](https://github.com/livekit/agents/blob/main/examples/avatar_agents/ojin/agent_worker.py).
+## Checking it works
+
+- The avatar animates and lip-syncs while the agent speaks.
+- Several turns complete in a row — the session returns to listening after each.
+- Interrupting mid-utterance stops the room audio immediately, and the next
+  reply plays normally.
+- Interrupting at the very start of a reply, before the avatar has begun
+  speaking, cannot be cancelled — see the interruption note below.
 
 ## Notes
+
+**The config id must name a model with a live backend.** If it does not, the
+session fails to start with `BACKEND_UNAVAILABLE`. That is the usual symptom of
+a config pointing at a renamed or undeployed model rather than of a bad key.
 
 **Frame size comes from the model.** Ojin models publish at their own resolution
 (1024x1024 and 736x1216 both occur), so the plugin waits for the first frame
