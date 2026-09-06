@@ -4,13 +4,15 @@ import asyncio
 import time
 
 import pytest
+from fake_stv import make_audio_frame, make_video_frame
 from ojin.stv import FrameType
 
 from livekit import rtc
 from livekit.agents.voice.avatar import AudioSegmentEnd
 from livekit.plugins.ojin.avatar import _FrameSink
 
-from .fake_stv import make_audio_frame, make_video_frame
+# Hermetic: driven by a fake Ojin client, no network and no credentials.
+pytestmark = pytest.mark.unit
 
 
 def drain(sink: _FrameSink) -> list[object]:

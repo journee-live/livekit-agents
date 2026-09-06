@@ -15,13 +15,15 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+from fake_stv import FakeSTVClient
 from ojin.stv import FrameType, STVEvent
 
 from livekit import rtc
 from livekit.agents.voice.avatar import AudioReceiver, AudioSegmentEnd, QueueAudioOutput
 from livekit.plugins.ojin.avatar import OjinVideoGenerator, _FrameSink
 
-from .fake_stv import FakeSTVClient
+# Hermetic: driven by a fake Ojin client, no network and no credentials.
+pytestmark = pytest.mark.unit
 
 
 class RunnerHarness:

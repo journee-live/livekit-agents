@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pytest
 from ojin.stv import FrameType, STVAudioFrame, STVVideoFrame
 
 from livekit import rtc
@@ -9,6 +10,9 @@ from livekit.plugins.ojin.frames import (
     to_audio_frame,
     to_video_frame,
 )
+
+# Hermetic: driven by a fake Ojin client, no network and no credentials.
+pytestmark = pytest.mark.unit
 
 
 def _video(width: int = 1024, height: int = 1024, *, rgb: bytes | None = b"", **kwargs):

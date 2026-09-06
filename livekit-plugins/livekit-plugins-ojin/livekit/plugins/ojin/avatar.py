@@ -860,6 +860,15 @@ class AvatarSession(BaseAvatarSession):
             return
         self._closed = True
 
+        # The base class removes `avatar_identity` from the room on close. For a
+        # local-runner avatar that identity is the agent's own participant, so
+        # letting that run would evict the agent from its own session - including
+        # on the degrade path, whose whole point is to keep the session alive.
+        # Detach the room first, and remove the listener the base would have.
+        room, self._room = self._room, None
+        if room is not None:
+            room.off("connection_state_changed", self._on_connection_state_changed)
+
         await super().aclose()
 
         if self._watchdog_task is not None:

@@ -4,15 +4,17 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
+from fake_stv import FakeSTVClient, make_audio_frame, make_video_frame
 from ojin.stv import STVConfig
 
 from livekit import rtc
-from livekit.agents.voice.avatar import AudioSegmentEnd, QueueAudioOutput
+from livekit.agents.voice.avatar import AudioSegmentEnd, QueueAudioOutput, _types as _avatar_types
 from livekit.plugins.ojin import avatar as avatar_mod
 from livekit.plugins.ojin.avatar import AvatarSession, _build_avatar_options, _FrameSink
 from livekit.plugins.ojin.errors import OjinException
 
-from .fake_stv import FakeSTVClient, make_audio_frame, make_video_frame
+# Hermetic: driven by a fake Ojin client, no network and no credentials.
+pytestmark = pytest.mark.unit
 
 
 @pytest.fixture(autouse=True)
@@ -418,3 +420,36 @@ async def test_degrade_does_not_leak_a_drain_when_aclose_races() -> None:
     await asyncio.wait_for(degrading, 2)
 
     assert s._null_drain_task is None, "a drain was started that nothing will stop"
+
+
+async def test_aclose_does_not_evict_the_agent_from_the_room(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The base class removes `avatar_identity` on close.
+
+    For a local-runner avatar that identity is the agent's own participant, so
+    running it would end the session the degrade path exists to preserve.
+    """
+    removed: list[object] = []
+
+    class _RoomApi:
+        async def remove_participant(self, req: object) -> None:
+            removed.append(req)
+
+    class _JobCtx:
+        api = SimpleNamespace(room=_RoomApi())
+
+    monkeypatch.setattr(_avatar_types, "get_job_context", lambda required=False: _JobCtx())
+
+    s = session()
+    s._client = FakeSTVClient()
+    s._room = SimpleNamespace(  # type: ignore[assignment]
+        isconnected=lambda: True,
+        name="room",
+        local_participant=SimpleNamespace(identity="agent"),
+        off=lambda *a: None,
+    )
+
+    await s.aclose()
+
+    assert removed == [], "aclose evicted the agent's own participant"

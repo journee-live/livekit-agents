@@ -5,12 +5,14 @@ import logging
 
 import numpy as np
 import pytest
+from fake_stv import FakeSTVClient, make_audio_frame, make_video_frame
 
 from livekit import rtc
 from livekit.agents.voice.avatar import AudioSegmentEnd
 from livekit.plugins.ojin.avatar import OjinVideoGenerator, _FrameSink
 
-from .fake_stv import FakeSTVClient, make_audio_frame, make_video_frame
+# Hermetic: driven by a fake Ojin client, no network and no credentials.
+pytestmark = pytest.mark.unit
 
 
 def chunk(ms: int = 40, sample_rate: int = 24000, num_channels: int = 1) -> rtc.AudioFrame:
