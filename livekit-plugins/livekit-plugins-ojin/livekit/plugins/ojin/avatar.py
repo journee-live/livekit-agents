@@ -353,43 +353,10 @@ class OjinVideoGenerator(VideoGenerator):
             self._sink.note_input_segment_end(had_real_audio=self._turn_had_real_audio)
             return
 
-        if not self._turn_started:
-            if self._sink.clear_pending:
-                # A barge-in is in flight; opening the turn first would let the
-                # interrupt clear this new turn's buffers.
-                await self._sink.wait_clear_done()
-
-            # Set before the await: start_turn() suspends on a real websocket send
-            # and anything running in that window must already see the open turn.
-            self._turn_started = True
-            self._turn_had_real_audio = False
-            # Opened before the await for the same reason the flag is set before
-            # it: anything running during the suspension must see the segment as
-            # already open. Opening it afterwards would reset the sink's
-            # input-side state and discard audio such a caller had reported,
-            # leaving an unrenderable turn with no deadline to close it.
-            self._sink.note_input_segment_open()
-            try:
-                await self._client.start_turn()
-            except Exception:
-                self._turn_started = False
-                # Never raise: an escape kills the runner's _read_audio task for
-                # the rest of the session (it is only guarded by log_exceptions).
-                logger.exception("ojin start_turn failed; dropping this chunk")
-                return
-
-        try:
-            pcm = downmix_to_mono(bytes(frame.data), frame.num_channels)
-            if frame.sample_rate != self._sample_rate:
-                # Ojin plays back whatever we feed it, and the room's track runs at
-                # a fixed rate, so anything else has to be converted here. The
-                # framework installs its own resampler only on a segment's first
-                # frame, so an off-rate frame can still reach us mid-stream.
-                pcm = self._resample(pcm, frame.sample_rate)
-        except Exception:
-            logger.exception("ojin audio conversion failed; dropping this chunk")
+        if not self._turn_started and not await self._open_turn():
             return
 
+        pcm = self._to_client_audio(frame)
         if not pcm:
             return
 
@@ -405,6 +372,48 @@ class OjinVideoGenerator(VideoGenerator):
             await self._client.send_tts_audio(pcm, self._sample_rate, NUM_CHANNELS)
         except Exception:
             logger.exception("ojin send_tts_audio failed; dropping this chunk")
+
+    async def _open_turn(self) -> bool:
+        """Open a turn on the client and the sink. False means drop this chunk."""
+        if self._sink.clear_pending:
+            # A barge-in is in flight; opening the turn first would let the
+            # interrupt clear this new turn's buffers.
+            await self._sink.wait_clear_done()
+
+        # Both the flag and the sink's segment are set before the await:
+        # start_turn() suspends on a real websocket send, and anything running in
+        # that window must already see the turn as open. Opening the segment
+        # afterwards would reset the sink's input-side state and discard audio
+        # such a caller had reported, leaving an unrenderable turn with no
+        # deadline to close it.
+        self._turn_started = True
+        self._turn_had_real_audio = False
+        self._sink.note_input_segment_open()
+
+        try:
+            await self._client.start_turn()
+        except Exception:
+            self._turn_started = False
+            # Never raise: an escape kills the runner's _read_audio task for the
+            # rest of the session (it is only guarded by log_exceptions).
+            logger.exception("ojin start_turn failed; dropping this chunk")
+            return False
+        return True
+
+    def _to_client_audio(self, frame: rtc.AudioFrame) -> bytes | None:
+        """Mono audio at the track's rate, or None if it could not be converted."""
+        try:
+            pcm = downmix_to_mono(bytes(frame.data), frame.num_channels)
+            if frame.sample_rate != self._sample_rate:
+                # Ojin plays back whatever we feed it, and the room's track runs
+                # at a fixed rate, so anything else has to be converted here. The
+                # framework installs its own resampler only on a segment's first
+                # frame, so an off-rate frame can still reach us mid-stream.
+                pcm = self._resample(pcm, frame.sample_rate)
+            return pcm
+        except Exception:
+            logger.exception("ojin audio conversion failed; dropping this chunk")
+            return None
 
     def _resample(self, pcm: bytes, input_rate: int) -> bytes:
         if self._resampler is None or self._resampler_input_rate != input_rate:
@@ -436,39 +445,42 @@ class OjinVideoGenerator(VideoGenerator):
         self._turn_started = False
         self._sink.begin_clear()
         try:
-            interrupted = await self._client.interrupt()
-            if interrupted:
+            if await self._client.interrupt():
                 self._last_interrupt_true = time.monotonic()
-            elif time.monotonic() - self._last_interrupt_true < self._fade_s:
-                # Our own recent interrupt is still fading out. Whatever the SDK's
-                # reason for refusing this one, keeping the mute is what matters:
-                # lifting it would leak that fade into the room.
-                logger.debug("ojin barge-in refused while a fade is in flight")
             else:
-                # Nothing was cancelled and no fade is coming, so the mute is pure
-                # harm: whatever plays next would lose its opening audio.
-                self._sink.abort_clear()
-                # begin_clear() already retired this segment's input state, so a
-                # turn that was not cancelled just renders into a fresh output
-                # segment when its frames arrive.
-                if turn_was_open:
-                    if not self._gap_interrupt_logged:
-                        # Documented v1 limitation: a turn that is already in
-                        # flight cannot be cancelled.
-                        self._gap_interrupt_logged = True
-                        # The SDK reports only "refused", not why: an in-flight
-                        # turn that has not started rendering (the inference gap)
-                        # and a cancel still being acknowledged are
-                        # indistinguishable from here. Either way this turn was
-                        # not cancelled.
-                        logger.warning(
-                            "ojin refused a barge-in and the pending turn was not "
-                            "cancelled, so that reply will play (SDK limitation)"
-                        )
+                self._on_interrupt_refused(turn_was_open)
         except Exception:
             logger.exception("ojin interrupt failed; continuing teardown-safe")
         finally:
             self._sink.finish_clear()
+
+    def _on_interrupt_refused(self, turn_was_open: bool) -> None:
+        """The SDK declined the barge-in; decide whether the mute still applies."""
+        if time.monotonic() - self._last_interrupt_true < self._fade_s:
+            # Our own recent interrupt is still fading out. Whatever the SDK's
+            # reason for refusing this one, keeping the mute is what matters:
+            # lifting it would leak that fade into the room.
+            logger.debug("ojin barge-in refused while a fade is in flight")
+            return
+
+        # Nothing was cancelled and no fade is coming, so the mute is pure harm:
+        # whatever plays next would lose its opening audio. begin_clear() already
+        # retired this segment's input state, so an uncancelled turn just renders
+        # into a fresh output segment when its frames arrive.
+        self._sink.abort_clear()
+
+        if not turn_was_open or self._gap_interrupt_logged:
+            return
+
+        # Documented v1 limitation, logged once. The SDK reports only "refused",
+        # not why: an in-flight turn that has not started rendering (the inference
+        # gap) and a cancel still being acknowledged are indistinguishable from
+        # here. Either way this turn was not cancelled.
+        self._gap_interrupt_logged = True
+        logger.warning(
+            "ojin refused a barge-in and the pending turn was not cancelled, "
+            "so that reply will play (SDK limitation)"
+        )
 
     def __aiter__(self) -> AsyncIterator[_FrameOrEnd]:
         return self._stream_impl()
@@ -476,6 +488,14 @@ class OjinVideoGenerator(VideoGenerator):
     async def _stream_impl(self) -> AsyncGenerator[_FrameOrEnd, None]:
         while True:
             yield await self._sink.next_frame()
+
+
+def _required(value: NotGivenOr[str], env_var: str) -> str:
+    """Take the argument if given, else the environment, else fail naming the variable."""
+    resolved = value if utils.is_given(value) else os.getenv(env_var)
+    if not resolved:
+        raise OjinException(f"{env_var} must be set by argument or environment variable")
+    return resolved
 
 
 def _build_avatar_options(
@@ -516,15 +536,8 @@ class AvatarSession(BaseAvatarSession):
     ) -> None:
         super().__init__()
 
-        api_key_val = api_key if utils.is_given(api_key) else os.getenv("OJIN_API_KEY")
-        config_id_val = config_id if utils.is_given(config_id) else os.getenv("OJIN_CONFIG_ID")
-        if not api_key_val:
-            raise OjinException("OJIN_API_KEY must be set by argument or environment variable")
-        if not config_id_val:
-            raise OjinException("OJIN_CONFIG_ID must be set by argument or environment variable")
-
-        self._api_key = api_key_val
-        self._config_id = config_id_val
+        self._api_key = _required(api_key, "OJIN_API_KEY")
+        self._config_id = _required(config_id, "OJIN_CONFIG_ID")
         self._ws_url = ws_url if utils.is_given(ws_url) else os.getenv("OJIN_WS_URL")
         self._stv_config = stv_config if utils.is_given(stv_config) else None
         self._audio_sample_rate = audio_sample_rate
@@ -606,6 +619,12 @@ class AvatarSession(BaseAvatarSession):
             raise
 
     async def _start(self, agent_session: AgentSession, room: rtc.Room) -> None:
+        sink = await self._connect()
+        first_frame = await self._await_first_frame(sink)
+        await self._start_runner(agent_session, room, sink, first_frame)
+
+    async def _connect(self) -> _FrameSink:
+        """Open the Ojin session and wait for it to be usable."""
         sink = self._build_sink()
         self._sink = sink
 
@@ -637,13 +656,24 @@ class AvatarSession(BaseAvatarSession):
         if self._fatal_error is not None:
             raise OjinException(f"ojin session failed to start: {self._fatal_error}")
 
+        return sink
+
+    async def _await_first_frame(self, sink: _FrameSink) -> STVVideoFrame:
+        """The frame that fixes the avatar's geometry for the rest of the session."""
         try:
-            first_frame = await sink.wait_for_first_video_frame(self._first_frame_timeout)
+            return await sink.wait_for_first_video_frame(self._first_frame_timeout)
         except asyncio.TimeoutError as e:
             raise OjinException(
                 f"ojin sent no video frame within {self._first_frame_timeout}s"
             ) from e
 
+    async def _start_runner(
+        self,
+        agent_session: AgentSession,
+        room: rtc.Room,
+        sink: _FrameSink,
+        first_frame: STVVideoFrame,
+    ) -> None:
         options = _build_avatar_options(
             first_frame,
             audio_sample_rate=self._audio_sample_rate,
@@ -663,9 +693,10 @@ class AvatarSession(BaseAvatarSession):
         receiver.on("clear_buffer", lambda *_: sink.note_clear_pending())
         self._audio_output = audio_output
 
+        assert self._client is not None
         self._avatar_runner = AvatarRunner(
             room=room,
-            video_gen=OjinVideoGenerator(client, sink),
+            video_gen=OjinVideoGenerator(self._client, sink),
             audio_recv=audio_output,
             options=options,
         )
