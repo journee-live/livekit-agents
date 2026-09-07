@@ -235,7 +235,7 @@ async def test_idle_ticks_do_not_complete_a_captured_segment(harness: RunnerHarn
     await until(lambda: harness.sink._input_closed, what="the input segment to close")
 
     for _ in range(10):
-        await harness.client.push_tick(silent=True)
+        await harness.client.push_tick(silent=True, frame_type=FrameType.IDLE)
 
     with pytest.raises(asyncio.TimeoutError):
         await asyncio.wait_for(harness.audio_output.wait_for_playout(), 0.2)
