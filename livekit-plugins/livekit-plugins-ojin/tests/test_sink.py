@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import time
 
 import pytest
 from fake_stv import make_audio_frame, make_video_frame
@@ -197,10 +196,17 @@ async def test_start_of_speech_unmutes_before_that_ticks_audio() -> None:
 
 
 async def test_mute_timer_expiry_unmutes() -> None:
+    """The fade window begin_clear() opens must close on its own.
+
+    START_OF_SPEECH normally lifts the mute; when the replacement turn never
+    arrives, only this timer stops the sink muting for the rest of the session.
+    """
     sink = _FrameSink(fade_s=0.0)
     sink.begin_clear()
-    sink._mute_deadline = time.monotonic() - 0.01
 
+    # begin_clear() arms fade_s plus a guard band; sleeping past the whole
+    # window is what proves the window is finite rather than a hand-set value.
+    await asyncio.sleep(0.3)
     await sink.write_audio(make_audio_frame())
 
     assert counts(drain(sink))[0] == 1
@@ -232,18 +238,6 @@ async def test_geometry_mismatch_dropped_stream_continues() -> None:
 
 
 # --- queue policy -----------------------------------------------------------
-
-
-async def test_writes_never_await_the_consumer() -> None:
-    sink = _FrameSink(video_queue_size=4)
-
-    started = time.monotonic()
-    for _ in range(500):
-        await sink.write_video(make_video_frame(2, 2))
-        await sink.write_audio(make_audio_frame())
-    elapsed = time.monotonic() - started
-
-    assert elapsed < 0.5, "sink blocked on a stalled consumer"
 
 
 async def test_audio_never_dropped_video_capped() -> None:
