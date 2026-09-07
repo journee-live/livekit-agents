@@ -35,26 +35,11 @@ await avatar.start(session, room=ctx.room)
 await session.start(agent=..., room=ctx.room)
 ```
 
-## Checking it works
-
-- The avatar animates and lip-syncs while the agent speaks.
-- Several turns complete in a row — the session returns to listening after each.
-- Interrupting mid-utterance stops the room audio immediately, and the next
-  reply plays normally.
-- Interrupting at the very start of a reply, before the avatar has begun
-  speaking, cannot be cancelled — see the interruption note below.
-
 ## Notes
 
-**The config id must name a model with a live backend.** If it does not, the
-session fails to start with `BACKEND_UNAVAILABLE`. That is the usual symptom of
-a config pointing at a renamed or undeployed model rather than of a bad key.
-
-**Frame size comes from the model.** Ojin models publish at their own resolution
-(1024x1024 and 736x1216 both occur), so the plugin waits for the first frame
-before it publishes the video track and logs the size it found. A model that
-changed resolution mid-session would corrupt the track, so mismatched frames are
-dropped with an error rather than published.
+**Frame size comes from the model,** not from configuration — 1024x1024 and
+736x1216 both occur. The plugin waits for the first frame before publishing the
+video track, and logs the size it found.
 
 **Interruptions stop the room audio immediately.** Ojin fades the cancelled turn
 out server-side, which keeps the avatar's mouth closing naturally, but that fade
