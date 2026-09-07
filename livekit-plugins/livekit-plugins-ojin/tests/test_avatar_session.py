@@ -156,7 +156,7 @@ async def test_fatal_is_first_wins_across_the_error_closed_pair() -> None:
     await client.emit_closed()
 
     assert s._fatal_error == "first"
-    assert s._degrade_starts == 0  # no runner yet, so nothing to degrade
+    assert s._degrade_task is None, "there is no runner yet, so nothing to degrade"
 
 
 async def test_plugin_initiated_close_is_ignored() -> None:

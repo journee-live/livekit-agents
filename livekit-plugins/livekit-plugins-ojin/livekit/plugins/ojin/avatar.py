@@ -29,6 +29,7 @@ from ojin.stv import (
 from .errors import OjinException
 from .frames import downmix_to_mono, is_silence, to_audio_frame, to_video_frame
 from .log import logger
+from .segments import _SegmentTracker
 
 SAMPLE_RATE = 24000
 NUM_CHANNELS = 1
@@ -84,19 +85,13 @@ class _FrameSink:
         self._video_count = 0
         self._dropped_video = 0
         self._fade_s = fade_s
-        self._turn_render_timeout = turn_render_timeout
         self._audio_sample_rate = audio_sample_rate
+        self._segments = _SegmentTracker(turn_render_timeout=turn_render_timeout)
         self._format_mismatches = 0
 
         self._first_video_frame: asyncio.Future[STVVideoFrame] | None = None
         self._geometry: tuple[int, int] | None = None
         self._geometry_mismatches = 0
-
-        # segment protocol
-        self._segment_open = False  # real audio forwarded since the last close
-        self._input_closed = True  # the generator reports the input side
-        self._output_drained = False  # stop edge seen while the input was open
-        self._input_had_audio = False  # real audio pushed in this input segment
 
         # mute window (barge-in)
         self._muting = False
@@ -110,8 +105,6 @@ class _FrameSink:
         # liveness: fresh SERVER frames only. The playback loop keeps synthesizing
         # sink writes forever after a dead transport, so writes prove nothing.
         self._last_server_frame_time = time.monotonic()
-        self._render_deadline: float | None = None
-        self._rendered_turns = 0  # any real audio played; resets the stall streak
 
     # --- STVOutput (called from the SDK's playback loop; must not block) ---
 
@@ -145,9 +138,7 @@ class _FrameSink:
                 return
             self._muting = False  # timer fallback: the fade must be over by now
 
-        self._segment_open = True
-        self._render_deadline = None  # the turn is rendering
-        self._rendered_turns += 1
+        self._segments.output_audio()
         self._append(to_audio_frame(frame))
 
     async def write_video(self, frame: STVVideoFrame) -> None:
@@ -184,42 +175,17 @@ class _FrameSink:
         # The WebSocket client never calls this; lifecycle arrives via add_listener.
         pass
 
-    # --- segment protocol (the input side is reported by the generator) ---
+    # --- segment protocol (decided by _SegmentTracker) ---
 
     def note_input_segment_open(self) -> None:
-        self._input_closed = False
-        self._output_drained = False
-        self._input_had_audio = False
-        self._render_deadline = None
+        self._segments.input_opened()
 
     def note_input_audio(self) -> None:
-        """A real chunk was pushed; its echo has not played yet.
-
-        Clearing the drained flag here rather than on output ticks stops a
-        back-to-back final-chunk + input-close from emitting the marker while the
-        refilled tail is still unplayed.
-        """
-        self._output_drained = False
-        self._input_had_audio = True
+        self._segments.input_audio()
 
     def note_input_segment_end(self, *, had_real_audio: bool = True) -> None:
-        self._input_closed = True
-
-        if not had_real_audio and not self._segment_open:
-            # An all-zero utterance never echoes back, so no stop edge will ever
-            # close it — but the runner captured the segment and the session is
-            # waiting on its report. Emit now.
+        if self._segments.input_ended(had_real_audio=had_real_audio):
             self._append(AudioSegmentEnd())
-            return
-
-        if self._segment_open and self._output_drained:
-            self._emit_segment_end()
-            return
-
-        if self._input_had_audio and not self._segment_open:
-            # Fed but not rendering yet: bound the wait. A healthy transport can
-            # stream idle frames forever while a turn never renders.
-            self._render_deadline = time.monotonic() + self._turn_render_timeout
 
     def on_bot_stopped_speaking(self, **kwargs: object) -> None:
         if self._muting:
@@ -228,19 +194,8 @@ class _FrameSink:
             # near-full-gain fade chunks are still coming. Unmuting here would
             # leak the audible fade.
             return
-        if not self._segment_open:
-            return
-        if self._input_closed:
-            self._emit_segment_end()
-        else:
-            # A mid-turn underrun: TTS is slower than playback. Not a turn end.
-            self._output_drained = True
-
-    def _emit_segment_end(self) -> None:
-        self._segment_open = False
-        self._output_drained = False
-        self._render_deadline = None
-        self._append(AudioSegmentEnd())
+        if self._segments.stopped_speaking():
+            self._append(AudioSegmentEnd())
 
     # --- barge-in ---
 
@@ -266,11 +221,7 @@ class _FrameSink:
         self._deque.clear()
         self._deque.extend(kept)
         self._video_count = len(kept)
-        self._segment_open = False
-        self._output_drained = False
-        self._input_closed = True
-        self._input_had_audio = False
-        self._render_deadline = None
+        self._segments.cleared()
         self._muting = True
         self._mute_deadline = time.monotonic() + self._fade_s + 0.25
 
@@ -325,17 +276,15 @@ class _FrameSink:
 
     @property
     def rendered_turns(self) -> int:
-        return self._rendered_turns
+        return self._segments.rendered_turns
 
     def render_deadline_expired(self) -> bool:
-        return self._render_deadline is not None and time.monotonic() > self._render_deadline
+        return self._segments.render_deadline_expired()
 
     def force_segment_end(self) -> None:
         """Close a fed turn the server never rendered, so the session can proceed."""
-        self._render_deadline = None
-        self._segment_open = False
-        self._output_drained = False
-        self._append(AudioSegmentEnd())
+        if self._segments.force_end():
+            self._append(AudioSegmentEnd())
 
     # --- consumer side ---
 
@@ -594,7 +543,6 @@ class AvatarSession(BaseAvatarSession):
         self._closed = False
         self._render_stalls = 0
         self._last_rendered_turns = 0
-        self._degrade_starts = 0
 
         self._watchdog_task: asyncio.Task[None] | None = None
         # Set when a second aclose() runs its drain cleanup, so a degrade still
@@ -813,7 +761,6 @@ class AvatarSession(BaseAvatarSession):
         reports flowing so the session degrades (silently, since the avatar
         carried the only audio track) instead of deadlocking.
         """
-        self._degrade_starts += 1
         await self.aclose()
 
         if self._drain_stopped:

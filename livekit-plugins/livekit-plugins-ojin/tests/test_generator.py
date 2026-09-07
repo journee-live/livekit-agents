@@ -67,11 +67,11 @@ async def test_input_side_reported_to_the_sink() -> None:
     client, sink, gen = build()
 
     await gen.push_audio(chunk())
-    assert sink._input_closed is False
-    assert sink._input_had_audio is True
+    assert sink._segments.input_closed is False
+    assert sink._segments.input_had_audio is True
 
     await gen.push_audio(AudioSegmentEnd())
-    assert sink._input_closed is True
+    assert sink._segments.input_closed is True
 
 
 async def test_turn_flag_set_before_the_awaited_start_turn() -> None:
@@ -137,7 +137,7 @@ async def test_zero_chunks_do_not_mark_real_audio() -> None:
     await gen.push_audio(silent)
 
     assert gen._turn_had_real_audio is False
-    assert sink._input_had_audio is False
+    assert sink._segments.input_had_audio is False
 
 
 # --- barge-in ---------------------------------------------------------------
@@ -164,7 +164,7 @@ async def test_failed_interrupt_lifts_the_mute_so_the_surviving_reply_is_heard()
 
     await sink.write_audio(make_audio_frame())
     assert len(sink.pending) == 1, "the reply that was not cancelled must still be heard"
-    assert sink._input_closed is True, "the uncancelled turn's input must be retired"
+    assert sink._segments.input_closed is True, "the uncancelled turn's input must be retired"
 
 
 async def test_failed_interrupt_while_idle_lifts_mute_without_warning(
@@ -321,7 +321,7 @@ async def test_audio_pushed_during_start_turn_survives_the_open() -> None:
     client.start_turn_gate.set()
     await asyncio.gather(opening, interleaved)
 
-    assert sink._input_had_audio is True, "audio reported during the await was lost"
+    assert sink._segments.input_had_audio is True, "audio reported during the await was lost"
 
     sink.note_input_segment_end(had_real_audio=True)
-    assert sink._render_deadline is not None, "an unrendered turn has no deadline"
+    assert sink._segments.render_deadline_armed, "an unrendered turn has no deadline"

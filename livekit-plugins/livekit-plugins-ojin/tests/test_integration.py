@@ -138,7 +138,7 @@ async def speak(h: RunnerHarness, *, chunks: int = 3) -> None:
         await h.audio_output.capture_frame(tts_chunk())
     h.audio_output.flush()
     await until(
-        lambda: len(h.client.sent) >= chunks and h.sink._input_closed,
+        lambda: len(h.client.sent) >= chunks and h.sink._segments.input_closed,
         what="the read loop to forward the utterance and close the input",
     )
 
@@ -148,7 +148,7 @@ async def speak(h: RunnerHarness, *, chunks: int = 3) -> None:
         await h.client.push_tick(
             frame_type=FrameType.START_OF_SPEECH if i == 0 else FrameType.SPEECH
         )
-    await until(lambda: h.sink._segment_open, what="the echo to open an output segment")
+    await until(lambda: h.sink._segments.output_open, what="the echo to open an output segment")
     await h.client.emit_stopped_speaking()
 
 
@@ -182,7 +182,7 @@ async def test_underrun_does_not_end_the_turn_early(harness: RunnerHarness) -> N
     # the rest of the utterance arrives and really ends
     await harness.audio_output.capture_frame(tts_chunk())
     harness.audio_output.flush()
-    await until(lambda: harness.sink._input_closed, what="the input segment to close")
+    await until(lambda: harness.sink._segments.input_closed, what="the input segment to close")
     await harness.client.push_tick()
     await harness.client.emit_stopped_speaking()
 
@@ -205,7 +205,7 @@ async def test_barge_in_recovers_into_a_following_turn(harness: RunnerHarness) -
     await harness.audio_output.capture_frame(tts_chunk())
     await until(lambda: bool(harness.client.sent), what="the chunk to reach the client")
     await harness.client.push_tick()
-    await until(lambda: harness.sink._segment_open, what="the echo to start playing")
+    await until(lambda: harness.sink._segments.output_open, what="the echo to start playing")
 
     harness.audio_output.clear_buffer()
     await until(lambda: events == [True], what="the interrupted report")
@@ -232,7 +232,7 @@ async def test_idle_ticks_do_not_complete_a_captured_segment(harness: RunnerHarn
     """Ojin streams silence forever between turns; none of it is a segment."""
     await harness.audio_output.capture_frame(tts_chunk())
     harness.audio_output.flush()
-    await until(lambda: harness.sink._input_closed, what="the input segment to close")
+    await until(lambda: harness.sink._segments.input_closed, what="the input segment to close")
 
     for _ in range(10):
         await harness.client.push_tick(silent=True, frame_type=FrameType.IDLE)
