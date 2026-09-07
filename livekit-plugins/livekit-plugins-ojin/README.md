@@ -1,10 +1,8 @@
-# LiveKit Plugins Ojin
+# Ojin plugin for LiveKit Agents
 
-Agent Framework plugin for [Ojin](https://ojin.ai) avatars.
+Support for avatars with [Ojin](https://ojin.ai/)'s Speech-To-Video models.
 
-The plugin drives an Ojin Speech-To-Video model with the agent's TTS audio and
-publishes the resulting lip-synced avatar — video plus the agent's own audio — on
-the agent's participant. Nothing else joins the room.
+See the [Ojin docs](https://docs.ojin.ai/) for more information.
 
 ## Installation
 
@@ -14,61 +12,5 @@ pip install livekit-plugins-ojin
 
 ## Pre-requisites
 
-An Ojin API key and the config id of the persona to drive, both from your
-[Ojin account](https://ojin.ai). Set them as `OJIN_API_KEY` and `OJIN_CONFIG_ID`,
-or pass them to the constructor.
-
-## Usage
-
-```python
-from livekit.agents import AgentSession
-from livekit.plugins import ojin
-
-session = AgentSession(...)
-
-avatar = ojin.AvatarSession(
-    # api_key / config_id default to OJIN_API_KEY / OJIN_CONFIG_ID
-)
-# Start the avatar first: it provides the session's audio output.
-await avatar.start(session, room=ctx.room)
-
-await session.start(agent=..., room=ctx.room)
-```
-
-## Notes
-
-**Frame size comes from the model,** not from configuration — 1024x1024 and
-736x1216 both occur. The plugin waits for the first frame before publishing the
-video track, and logs the size it found.
-
-**Interruptions stop the room audio immediately.** Ojin fades the cancelled turn
-out server-side, which keeps the avatar's mouth closing naturally, but that fade
-is not played into the room — `clear_buffer` means stop now. One case cannot be
-cancelled yet: a barge-in that lands before the avatar has started speaking
-(while the model is still rendering) has nothing to cancel, so that reply plays
-through. It is logged once per session and is fixed by an upcoming SDK change.
-
-**Tuning.** Pass an `ojin.stv.STVConfig` as `stv_config` to adjust buffering, the
-interrupt fade, or the frame rate; the plugin keeps the video track's frame rate
-in step with it.
-
-**macOS.** `ojin-client[stv]` brings `opencv-python-headless`, whose bundled
-ffmpeg libraries collide with the ones in `av`. The resulting `objc[...] Class
-AVF... is implemented in both ...` warnings at startup are harmless.
-
-## Configuration
-
-| Argument | Default | Meaning |
-|---|---|---|
-| `api_key` | `OJIN_API_KEY` | Ojin API key |
-| `config_id` | `OJIN_CONFIG_ID` | persona to drive |
-| `ws_url` | `OJIN_WS_URL` or the SDK default | Ojin realtime endpoint |
-| `stv_config` | SDK defaults | `STVConfig` passed to the client |
-| `audio_sample_rate` | `24000` | rate the agent's TTS is resampled to |
-| `session_ready_timeout` | `30.0` | seconds to wait for the session |
-| `first_frame_timeout` | `15.0` | seconds to wait for the first video frame (waited *after* the one above, so an unreachable backend fails `start()` in up to 45 s) |
-| `watchdog_timeout` | `15.0` | seconds without a server frame before failing (terminal — the avatar does not reconnect) |
-| `turn_render_timeout` | `10.0` | seconds a fed turn may go unrendered |
-
-If the session fails mid-conversation the avatar is torn down and the agent keeps
-running (silently — the avatar carried the audio track) rather than hanging.
+You'll need an API key from Ojin and the id of the persona to drive. They can be
+set as environment variables: `OJIN_API_KEY`, `OJIN_CONFIG_ID`

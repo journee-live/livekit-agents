@@ -348,6 +348,7 @@ class OjinVideoGenerator(VideoGenerator):
         self._resampler_input_rate = 0
 
     async def push_audio(self, frame: rtc.AudioFrame | AudioSegmentEnd) -> None:
+        """Send one chunk of the agent's speech, or close the current utterance."""
         if isinstance(frame, AudioSegmentEnd):
             self._turn_started = False
             self._sink.note_input_segment_end(had_real_audio=self._turn_had_real_audio)
@@ -518,7 +519,32 @@ def _build_avatar_options(
 class AvatarSession(BaseAvatarSession):
     """An Ojin avatar session.
 
-    Renders in process and publishes the avatar on the agent's own participant.
+    Drives an Ojin Speech-To-Video model with the agent's own speech and
+    publishes the lip-synced result on the agent's participant. Ojin is a frame
+    service rather than a room participant, so rendering happens in process and
+    no second participant joins.
+
+    Start it before `AgentSession`: it provides the session's audio output.
+
+    ```python
+    avatar = ojin.AvatarSession()          # reads OJIN_API_KEY / OJIN_CONFIG_ID
+    await avatar.start(session, room=ctx.room)
+    await session.start(agent=..., room=ctx.room)
+    ```
+
+    The video track's resolution belongs to the model rather than to
+    configuration (1024x1024 and 736x1216 both occur), so the track is published
+    once the first frame arrives and its size is logged.
+
+    A barge-in stops the room's audio immediately. Ojin fades the cancelled turn
+    out server-side, which lets the avatar's mouth close naturally, but that fade
+    is not played into the room. One case cannot be cancelled: a barge-in landing
+    before the avatar has begun speaking has nothing to cancel yet, so that reply
+    plays through; it is logged once per session.
+
+    If the session fails mid-conversation the avatar is torn down and the agent
+    keeps running - silently, since the avatar carried the audio track - rather
+    than hanging.
     """
 
     def __init__(
@@ -534,6 +560,25 @@ class AvatarSession(BaseAvatarSession):
         watchdog_timeout: float = _DEFAULT_WATCHDOG_TIMEOUT,
         turn_render_timeout: float = _DEFAULT_TURN_RENDER_TIMEOUT,
     ) -> None:
+        """
+        Args:
+            api_key: Ojin API key. Defaults to `OJIN_API_KEY`.
+            config_id: the persona to drive. Defaults to `OJIN_CONFIG_ID`.
+            ws_url: Ojin realtime endpoint. Defaults to `OJIN_WS_URL`, else the
+                SDK's own default.
+            stv_config: an `ojin.stv.STVConfig` for buffering, the interrupt fade
+                or the frame rate. The video track's frame rate follows it.
+            audio_sample_rate: the rate the agent's speech is resampled to before
+                being sent, and the rate the avatar's audio track runs at.
+            session_ready_timeout: seconds to wait for the Ojin session.
+            first_frame_timeout: seconds to wait for the first video frame,
+                counted after the session is ready.
+            watchdog_timeout: seconds without a frame from the server before the
+                session is treated as dead. Terminal - the avatar does not
+                reconnect.
+            turn_render_timeout: seconds a turn may go unrendered before its
+                segment is closed so the conversation can continue.
+        """
         super().__init__()
 
         self._api_key = _required(api_key, "OJIN_API_KEY")
@@ -569,6 +614,7 @@ class AvatarSession(BaseAvatarSession):
 
     @property
     def avatar_identity(self) -> str:
+        """The participant publishing the avatar - here the agent's own."""
         # The avatar publishes on the agent's own participant, so the identity is
         # the local one.
         if self._room is not None:
@@ -577,6 +623,7 @@ class AvatarSession(BaseAvatarSession):
 
     @property
     def provider(self) -> str:
+        """The provider name reported in avatar metrics."""
         return "ojin"
 
     def _effective_fps(self) -> int:
@@ -609,6 +656,12 @@ class AvatarSession(BaseAvatarSession):
         client.add_listener(STVEvent.BOT_STOPPED_SPEAKING, sink.on_bot_stopped_speaking)
 
     async def start(self, agent_session: AgentSession, room: rtc.Room) -> None:
+        """Open the Ojin session and publish the avatar into `room`.
+
+        Assigns the session's audio output, so call this before
+        `AgentSession.start()`. Raises `OjinException` if the session cannot be
+        opened, leaving nothing behind.
+        """
         await super().start(agent_session, room)
         try:
             await self._start(agent_session, room)
@@ -828,6 +881,7 @@ class AvatarSession(BaseAvatarSession):
             position += frame.duration
 
     async def aclose(self) -> None:
+        """Tear the avatar down. Safe to call more than once."""
         if self._closed:
             self._drain_stopped = True
             # Teardown already ran, but a degraded session starts its null drain
